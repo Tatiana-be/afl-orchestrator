@@ -1,0 +1,34 @@
+# AFL Orchestrator Documentation Validation Configuration
+
+validation:
+  # Директории
+  docs_dir: "./documentation"
+  output_dir: "./reports"
+  
+  # Файлы для проверки
+  include_patterns:
+    - "*.md"
+  exclude_patterns:
+    - "CHANGELOG.md"
+    - "node_modules/**"
+  
+  # Правила терминологии
+  terminology:
+    preferred:
+      workflow: ["pipeline", "flow", "process"]
+      project_id: ["projectId", "proj_id"]
+      API: ["Api", "api"]
+      UUID: ["uuid"]
+      PostgreSQL: ["postgres", "Postgres"]
+  
+  # Пороги
+  thresholds:
+    max_broken_links: 0
+    max_terminology_issues: 5
+    max_table_errors: 0
+  
+  # CI/CD настройки
+  ci:
+    fail_on_warning: false
+    output_format: ["json", "html"]
+    upload_artifacts: true
