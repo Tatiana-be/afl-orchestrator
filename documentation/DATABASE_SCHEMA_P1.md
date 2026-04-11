@@ -1,7 +1,13 @@
 # AFL Orchestrator: Схема Базы Данных (Часть 1)
 
-**Версия**: 1.0 **Дата**: 2026-03-31 **Статус**: Approved for Development
+**Версия**: 1.1 **Дата**: 2026-04-10 **Статус**: Approved for Development
 **Автор**: Senior DB Engineer & Data Architect
+
+**Changelog v1.1 (AFL-101)**:
+- Added `workflow_error_code` ENUM with 5 values (separate from status)
+- Added comments to all 7 workflow statuses
+- Added CHECK constraint for `error_code` validation
+- Added indexes: `idx_workflows_error_code`, `idx_workflows_failed_at`, `idx_workflows_retryable`
 
 ---
 
@@ -579,6 +585,62 @@ CREATE INDEX idx_workflows_metadata ON workflows USING GIN(metadata);
 
 -- BRIN индекс для временных запросов (эффективен для больших таблиц)
 CREATE INDEX idx_workflows_created_at_brin ON workflows USING BRIN(created_at);
+
+-- ENUM: Статусы Workflow
+-- pending   — Создан, ожидает планировщика
+-- queued    — Запланирован, ожидает исполнителя
+-- running   — Выполняется
+-- paused    — Временно приостановлен
+-- completed — Успешно завершён
+-- failed    — Ошибка выполнения (может быть повторён)
+-- cancelled — Отменён пользователем или системой
+COMMENT ON CONSTRAINT check_workflow_status ON workflows IS 'Жизненный цикл workflow:
+  pending → queued → running → [completed | failed | cancelled]
+                                ↖ paused ↗';
+
+-- ENUM: Причины ошибок Workflow
+-- guardrail_violation — Нарушение гардрейла безопасности (non-retryable)
+-- budget_exceeded     — Превышен бюджет токенов (non-retryable)
+-- agent_error         — Ошибка в агенте: таймаут, исключение (retryable)
+-- system_error        — Системная ошибка: БД, сеть (retryable)
+-- cancelled_by_user   — Отменено пользователем (non-retryable)
+CREATE TYPE workflow_error_code AS ENUM (
+    'guardrail_violation',
+    'budget_exceeded',
+    'agent_error',
+    'system_error',
+    'cancelled_by_user'
+);
+
+COMMENT ON TYPE workflow_error_code IS 'Причины ошибок workflow.
+  Заполняется только когда status = failed или cancelled.
+  retryable: agent_error, system_error.
+  non-retryable: guardrail_violation, budget_exceeded, cancelled_by_user';
+
+-- Ограничение для error_code
+ALTER TABLE workflows
+    ADD CONSTRAINT check_workflow_error_code
+    CHECK (error_code IS NULL OR error_code IN (
+        'guardrail_violation', 'budget_exceeded',
+        'agent_error', 'system_error', 'cancelled_by_user'
+    )),
+    ADD CONSTRAINT check_error_code_requires_status
+    CHECK (
+        error_code IS NOT NULL OR
+        status NOT IN ('failed', 'cancelled')
+    );
+
+COMMENT ON COLUMN workflows.error_code IS 'Причина ошибки. Заполняется только при status = failed/cancelled';
+COMMENT ON COLUMN workflows.error_message IS 'Человекочитаемое описание ошибки для отладки';
+COMMENT ON COLUMN workflows.failed_at IS 'Временная метка последнего перехода в failed';
+
+-- Индексы для полей ошибок
+CREATE INDEX idx_workflows_error_code ON workflows(error_code)
+    WHERE error_code IS NOT NULL;
+CREATE INDEX idx_workflows_failed_at ON workflows(failed_at)
+    WHERE failed_at IS NOT NULL;
+CREATE INDEX idx_workflows_retryable ON workflows(error_code, failed_at)
+    WHERE error_code IN ('agent_error', 'system_error');
 
 -- Комментарии
 COMMENT ON TABLE workflows IS 'Запуски workflow в системе';

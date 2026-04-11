@@ -1,7 +1,15 @@
 # AFL Orchestrator: Полная Спецификация API
 
-**Версия**: 1.0 **Дата**: 2026-03-31 **Статус**: Approved for Development
+**Версия**: 1.1 **Дата**: 2026-04-10 **Статус**: Approved for Development
 **Автор**: Backend Lead & API Architect
+
+**Changelog v1.1 (AFL-101)**:
+- Unified workflow status enum to 7 values: `pending, queued, running, paused, completed, failed, cancelled`
+- Added `error_code` and `error_message` fields to workflow responses
+- Initial status for POST /workflows response: `pending`
+- Added 8 webhook events covering all status transitions
+- Added workflow status reference table and error_code documentation
+- Added `queued` and `pending` to GET /workflows query parameter filter
 
 ---
 
@@ -263,21 +271,26 @@ Request Body:
     webhook_url: { type: string, format: uri }
     metadata: { type: object }
 
-Response 202 Accepted:
+Response 201 Created:
   type: object
   properties:
     workflow_id: { type: string, format: uuid }
     project_id: { type: string }
-    status: { type: string, enum: [queued, pending] }
+    status: { type: string, enum: [pending] }
+    error_code: { type: string, nullable: true }
+    error_message: { type: string, nullable: true }
     created_at: { type: string, format: date-time }
-    estimated_duration: { type: integer, description: "секунды" }
+    estimated_queue_time_seconds: { type: integer }
     status_url: { type: string, format: uri }
 
+Note: Initial status always `pending` after creation.
+
 WebSocket Events:
-  - workflow.started
-  - workflow.progress
-  - workflow.step_completed
-  - workflow.step_failed
+  - workflow.pending
+  - workflow.queued
+  - workflow.running
+  - workflow.paused
+  - workflow.resumed
   - workflow.completed
   - workflow.failed
   - workflow.cancelled
@@ -295,7 +308,7 @@ Query Parameters:
   - cursor: string (optional)
   - limit: integer, default=20, min=1, max=100
   - project_id: string (optional)
-  - status: enum [queued, running, paused, completed, failed, cancelled]
+  - status: enum [pending, queued, running, paused, completed, failed, cancelled]
   - config_version: string (optional)
   - created_from: string, format=date-time
   - created_to: string, format=date-time
@@ -326,8 +339,11 @@ Response 200:
     status:
       {
         type: string,
-        enum: [queued, running, paused, completed, failed, cancelled],
+        enum: [pending, queued, running, paused, completed, failed, cancelled],
       }
+    error_code:
+      { type: string, enum: [guardrail_violation, budget_exceeded, agent_error, system_error, cancelled_by_user], nullable: true }
+    error_message: { type: string, nullable: true }
     progress: { type: number, min: 0, max: 1 }
     current_step: { type: string, nullable: true }
     total_steps: { type: integer }
@@ -336,7 +352,10 @@ Response 200:
     created_at: { type: string, format: date-time }
     started_at: { type: string, format: date-time, nullable: true }
     updated_at: { type: string, format: date-time }
-    finished_at: { type: string, format: date-time, nullable: true }
+    paused_at: { type: string, format: date-time, nullable: true }
+    completed_at: { type: string, format: date-time, nullable: true }
+    failed_at: { type: string, format: date-time, nullable: true }
+    cancelled_at: { type: string, format: date-time, nullable: true }
     estimated_duration: { type: integer }
     elapsed_time: { type: integer }
     tokens_used: { type: integer }
@@ -441,6 +460,31 @@ Request Body:
 
 Response 204: No Content
 ```
+
+#### 2.3.1 Workflow Status Reference
+
+| Status | HTTP Webhook | Client-facing description |
+|--------|--------------|---------------------------|
+| pending | workflow.pending | Created, awaiting scheduler assignment |
+| queued | workflow.queued | Scheduled, waiting for executor |
+| running | workflow.running | Currently executing |
+| paused | workflow.paused | Suspended by user |
+| completed | workflow.completed | Successfully finished |
+| failed | workflow.failed | Error occurred (see `error_code`) |
+| cancelled | workflow.cancelled | Cancelled by user or system |
+
+#### 2.3.2 Error Codes
+
+| error_code | Description | Retryable | Action |
+|------------|-------------|-----------|--------|
+| guardrail_violation | Security guardrail violated | ❌ | Fix configuration |
+| budget_exceeded | Token budget exceeded | ❌ | Increase budget |
+| agent_error | Agent error (timeout, exception) | ✅ | Auto-retry |
+| system_error | System error (DB, network) | ✅ | Auto-retry |
+| cancelled_by_user | Cancelled by user | ❌ | — |
+
+⚠️ **Note:** `budget_exceeded` is an `error_code`, **not** a workflow status.
+When budget is exceeded, the workflow transitions to `failed` with `error_code: budget_exceeded`.
 
 ---
 
@@ -722,9 +766,9 @@ Response 200:
 
 Available Events:
   Workflow:
-    workflow.started, workflow.completed, workflow.failed, workflow.paused,
-    workflow.resumed, workflow.cancelled, workflow.step_completed,
-    workflow.step_failed
+    workflow.pending, workflow.queued, workflow.running, workflow.paused,
+    workflow.resumed, workflow.completed, workflow.failed, workflow.cancelled,
+    workflow.step_completed, workflow.step_failed
   Budget: budget.warning, budget.exceeded, budget.updated
   Agent: agent.created, agent.destroyed, agent.error, agent.idle, agent.busy
   Config: config.created, config.updated, config.validated

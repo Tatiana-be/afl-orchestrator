@@ -1,7 +1,14 @@
 # AFL Orchestrator MVP: Техническое Задание и Архитектурный Дизайн-Документ
 
-**Версия документа**: 1.0 **Дата**: 2026-03-30 **Статус**: Черновик **Автор**:
+**Версия документа**: 1.1 **Дата**: 2026-04-10 **Статус**: Черновик **Автор**:
 Ведущий Системный Архитектор
+
+**Changelog v1.1 (AFL-101)**:
+- Removed `budget_exceeded` from workflow statuses — now an `error_code`
+- Added 7 canonical workflow statuses (added `queued`)
+- Added error_code section with retryable/non-retryable classification
+- Updated sequence diagram: budget exceeded → `failed` with `error_code: budget_exceeded`
+- Updated error handling section with explicit error_code references
 
 ---
 
@@ -364,7 +371,7 @@ sequenceDiagram
     Agent-->>Engine: budget_exceeded_error
 
     Engine->>Engine: handle_budget_exceeded()
-    Engine->>Storage: update_workflow_state(budget_exceeded)
+    Engine->>Storage: update_workflow_state(failed, error_code=budget_exceeded)
     Engine->>API: workflow_failed(budget_exceeded)
     API-->>User: webhook / email notification
 
@@ -410,7 +417,7 @@ sequenceDiagram
 
 5. **Фаза 5: Агент C (превышение бюджета)**:
    - Budget Tracker обнаруживает превышение лимита, блокирует выполнение.
-   - Workflow переходит в состояние `budget_exceeded`, отправляются уведомления.
+   - Workflow переходит в состояние `failed` с `error_code: budget_exceeded`, отправляются уведомления.
    - Альтернативный сценарий: если бюджет не превышен, workflow завершается
      успешно.
 
@@ -430,11 +437,39 @@ sequenceDiagram
 
 #### Обработка ошибок и восстановление:
 
-1. **Guardrail violation**: Повторное выполнение шага с retry логикой.
-2. **Budget exceeded**: Немедленная остановка workflow, уведомление
-   пользователя.
-3. **LLM timeout**: Circuit breaker, fallback на другую модель.
+1. **Guardrail violation**: Workflow → `failed` с `error_code: guardrail_violation` (non-retryable).
+2. **Budget exceeded**: Workflow → `failed` с `error_code: budget_exceeded` (non-retryable).
+3. **LLM timeout**: Workflow → `failed` с `error_code: agent_error` (retryable), circuit breaker, fallback на другую модель.
 4. **Storage failure**: Retry с exponential backoff, сохранение в кэш Redis.
+
+#### Статусы Workflow
+
+Workflow проходит через следующие состояния в процессе выполнения:
+
+| Статус | Описание | Кто инициирует |
+|--------|----------|----------------|
+| pending | Создан, ожидает планировщика | Система (после POST /workflows) |
+| queued | Запланирован, ожидает исполнителя | Scheduler |
+| running | Выполняется | Executor |
+| paused | Временно приостановлен | Пользователь |
+| completed | Успешно завершён | Система |
+| failed | Ошибка выполнения | Система |
+| cancelled | Отменён | Пользователь или Система |
+
+#### Причины ошибок (error_code)
+
+При статусе `failed` или `cancelled` поле `error_code` указывает причину:
+
+| Код | Описание | Можно повторить | Действие |
+|-----|----------|-----------------|----------|
+| guardrail_violation | Нарушение гардрейла безопасности | ❌ Нет | Исправить конфигурацию |
+| budget_exceeded | Превышен бюджет токенов | ❌ Нет | Увеличить бюджет |
+| agent_error | Ошибка в агенте (таймаут, исключение) | ✅ Да | Система попытается автоматически |
+| system_error | Системная ошибка (БД, сеть) | ✅ Да | Система попытается автоматически |
+| cancelled_by_user | Отменено пользователем | ❌ Нет | — |
+
+⚠️ **Важно:** `budget_exceeded` — это НЕ статус, а причина ошибки (`error_code`).
+Workflow при этом получает статус `failed`.
 
 ---
 

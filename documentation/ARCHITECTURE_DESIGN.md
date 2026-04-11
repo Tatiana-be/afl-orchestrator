@@ -1,7 +1,13 @@
 # AFL Orchestrator: Детальная Архитектура Системы
 
-**Версия**: 1.0 **Дата**: 2026-03-31 **Статус**: Approved **Автор**: Senior
+**Версия**: 1.1 **Дата**: 2026-04-10 **Статус**: Approved **Автор**: Senior
 System Architect
+
+**Changelog v1.1 (AFL-101)**:
+- Added `QUEUED` state to WorkflowState enum (7 states total)
+- Added `WorkflowErrorCode` enum (5 error codes)
+- Added state diagram (Mermaid), transition matrix (7×7)
+- Added error_code classification: retryable vs non-retryable
 
 ---
 
@@ -278,6 +284,7 @@ sequenceDiagram
 | 1    | Валидация конфига     | <50 мс          | <100 мс |
 | 1    | Создание записи в БД  | <10 мс          | <20 мс  |
 | 2    | Построение графа      | <20 мс          | <50 мс  |
+| 2    | Планирование (queued) | <50 мс          | <100 мс |
 | 3    | Получение контекста   | <100 мс         | <200 мс |
 | 3    | Проверка бюджета      | <10 мс          | <20 мс  |
 | 3    | LLM вызов             | 2-15 сек        | <30 сек |
@@ -907,11 +914,22 @@ from datetime import datetime
 
 class WorkflowState(Enum):
     PENDING = auto()
+    QUEUED = auto()
     RUNNING = auto()
     PAUSED = auto()
     COMPLETED = auto()
     FAILED = auto()
     CANCELLED = auto()
+
+
+class WorkflowErrorCode(Enum):
+    """Причины ошибок workflow (отдельно от status)."""
+    GUARDRAIL_VIOLATION = "guardrail_violation"   # non-retryable
+    BUDGET_EXCEEDED = "budget_exceeded"           # non-retryable
+    AGENT_ERROR = "agent_error"                   # retryable
+    SYSTEM_ERROR = "system_error"                 # retryable
+    CANCELLED_BY_USER = "cancelled_by_user"       # non-retryable
+
 
 @dataclass
 class StateTransition:
@@ -919,21 +937,29 @@ class StateTransition:
     to_state: WorkflowState
     condition: Optional[Callable] = None
 
+
 class WorkflowStateMachine:
-    """Машина состояний для workflow"""
+    """Машина состояний для workflow — 7 состояний + error_code."""
 
     # Определение допустимых переходов
     TRANSITIONS = [
-        StateTransition(WorkflowState.PENDING, WorkflowState.RUNNING),
-        StateTransition(WorkflowState.RUNNING, WorkflowState.PAUSED),
-        StateTransition(WorkflowState.PAUSED, WorkflowState.RUNNING),
+        StateTransition(WorkflowState.PENDING, WorkflowState.QUEUED),
+        StateTransition(WorkflowState.PENDING, WorkflowState.CANCELLED),
+        StateTransition(WorkflowState.QUEUED, WorkflowState.RUNNING),
+        StateTransition(WorkflowState.QUEUED, WorkflowState.CANCELLED),
         StateTransition(WorkflowState.RUNNING, WorkflowState.COMPLETED,
                        lambda ctx: ctx.all_steps_completed),
         StateTransition(WorkflowState.RUNNING, WorkflowState.FAILED),
+        StateTransition(WorkflowState.RUNNING, WorkflowState.PAUSED),
         StateTransition(WorkflowState.RUNNING, WorkflowState.CANCELLED),
+        StateTransition(WorkflowState.PAUSED, WorkflowState.RUNNING),
         StateTransition(WorkflowState.PAUSED, WorkflowState.CANCELLED),
-        StateTransition(WorkflowState.FAILED, WorkflowState.RUNNING,
-                       lambda ctx: ctx.retry_allowed),
+        StateTransition(WorkflowState.FAILED, WorkflowState.QUEUED,
+                       lambda ctx: ctx.retry_allowed and ctx.error_code in (
+                           WorkflowErrorCode.AGENT_ERROR,
+                           WorkflowErrorCode.SYSTEM_ERROR
+                       )),
+        StateTransition(WorkflowState.FAILED, WorkflowState.CANCELLED),
     ]
 
     def __init__(self, execution_id: str, storage: Storage):
@@ -1005,6 +1031,72 @@ class WorkflowStateMachine:
                 return t
         return None
 ```
+
+### 7.1.1 Диаграмма состояний (State Diagram)
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: Create
+    pending --> queued: Scheduler assigns
+    pending --> cancelled: User cancel
+    queued --> running: Executor available
+    queued --> cancelled: User cancel
+    running --> completed: Success
+    running --> failed: Error occurred
+    running --> paused: User pause
+    running --> cancelled: User cancel
+    paused --> running: User resume
+    paused --> cancelled: User cancel
+    failed --> queued: Retry (retryable error)
+    failed --> cancelled: Max retries / non-retryable
+    completed --> [*]: Terminal
+    cancelled --> [*]: Terminal
+
+    note right of failed
+      error_code указывает причину:
+      - guardrail_violation (no retry)
+      - budget_exceeded (no retry)
+      - agent_error (retryable)
+      - system_error (retryable)
+    end note
+```
+
+### 7.1.2 Таблица статусов
+
+| Status | Описание | Initial | Terminal | Retryable |
+|--------|----------|---------|----------|-----------|
+| pending | Создан, ожидает планировщика | ✅ | ❌ | N/A |
+| queued | Запланирован, ждёт исполнителя | ❌ | ❌ | N/A |
+| running | Выполняется | ❌ | ❌ | N/A |
+| paused | Временно приостановлен | ❌ | ❌ | N/A |
+| completed | Успешно завершён | ❌ | ✅ | N/A |
+| failed | Ошибка выполнения | ❌ | ❌ | ✅ (depends on error_code) |
+| cancelled | Отменён | ❌ | ✅ | ❌ |
+
+### 7.1.3 Матрица переходов
+
+| From \ To | pending | queued | running | paused | completed | failed | cancelled |
+|-----------|---------|--------|---------|--------|-----------|--------|-----------|
+| pending   | — | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| queued    | ❌ | — | ✅ | ❌ | ❌ | ❌ | ✅ |
+| running   | ❌ | ❌ | — | ✅ | ✅ | ✅ | ✅ |
+| paused    | ❌ | ❌ | ✅ | — | ❌ | ❌ | ✅ |
+| completed | ❌ | ❌ | ❌ | ❌ | — | ❌ | ❌ |
+| failed    | ❌ | ✅ | ❌ | ❌ | ❌ | — | ✅ |
+| cancelled | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | — |
+
+### 7.1.4 Причины ошибок (error_code)
+
+| error_code | Описание | Retryable | Когда устанавливается |
+|------------|----------|-----------|----------------------|
+| guardrail_violation | Нарушение гардрейла безопасности | ❌ | Guardrail Engine отклонил результат |
+| budget_exceeded | Превышен бюджет токенов | ❌ | Budget Tracker заблокировал выполнение |
+| agent_error | Ошибка в агенте (таймаут, исключение) | ✅ | Agent Executor сообщил об ошибке |
+| system_error | Системная ошибка (БД, сеть) | ✅ | Infrastructure layer сообщил об ошибке |
+| cancelled_by_user | Отменено пользователем | ❌ | User action через API |
+
+⚠️ **Важно:** `budget_exceeded` — это **НЕ статус**, а причина ошибки (`error_code`).
+Workflow при этом получает статус `failed`.
 
 ### 7.2 Context Manager: Compression Strategy
 
