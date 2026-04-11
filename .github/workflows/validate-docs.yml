@@ -54,7 +54,6 @@ jobs:
       with:
         script: |
           const fs = require('fs');
-          const path = require('path');
 
           const reportPath = './reports/validation_results.json';
 
@@ -66,24 +65,25 @@ jobs:
           const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
           const summary = report.summary;
 
-          const status = summary.failed > 0
-            ? '❌ **Validation FAILED** — Please fix issues before merge.'
-            : summary.warnings > 0
-              ? '⚠️ **Validation PASSED with warnings**'
-              : '✅ **Validation PASSED**';
+          let validationResult = '✅ **Validation PASSED**';
+          if (summary.failed > 0) {
+            validationResult = '❌ **Validation FAILED** — Please fix issues before merge.';
+          } else if (summary.warnings > 0) {
+            validationResult = '⚠️ **Validation PASSED with warnings**';
+          }
 
-          const comment = `## 📋 Documentation Validation Results
-
-| Check | Status |
-|-------|--------|
-| Total | ${summary.total} |
-| ✅ Passed | ${summary.passed} |
-| ❌ Failed | ${summary.failed} |
-| ⚠️ Warnings | ${summary.warnings} |
-
-${status}
-
-_Related: #4 (AFL-101)_`;
+          const comment = [
+            '## 📋 Documentation Validation Results',
+            '',
+            '| Check | Result |',
+            '|-------|--------|',
+            '| Total | ' + summary.total + ' |',
+            '| ✅ Passed | ' + summary.passed + ' |',
+            '| ❌ Failed | ' + summary.failed + ' |',
+            '| ⚠️ Warnings | ' + summary.warnings + ' |',
+            '',
+            validationResult,
+          ].join('\n');
 
           await github.rest.issues.createComment({
             issue_number: context.issue.number,
