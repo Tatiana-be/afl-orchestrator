@@ -11,10 +11,15 @@ on:
     paths:
       - 'documentation/**'
 
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
 jobs:
   validate:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -44,28 +49,43 @@ jobs:
         retention-days: 30
 
     - name: Comment on PR
+      if: github.event_name == 'pull_request' && !cancelled()
       uses: actions/github-script@v7
-      if: github.event_name == 'pull_request'
       with:
         script: |
           const fs = require('fs');
-          const report = JSON.parse(fs.readFileSync('./reports/validation_results.json', 'utf8'));
-          
+          const path = require('path');
+
+          const reportPath = './reports/validation_results.json';
+
+          if (!fs.existsSync(reportPath)) {
+            console.log('No validation report found, skipping comment.');
+            return;
+          }
+
+          const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
           const summary = report.summary;
-          const comment = `
-          ## 📋 Documentation Validation Results
-          
-          | Check | Status |
-          |-------|--------|
-          | Total | ${summary.total} |
-          | ✅ Passed | ${summary.passed} |
-          | ❌ Failed | ${summary.failed} |
-          | ⚠️ Warnings | ${summary.warnings} |
-          
-          ${summary.failed > 0 ? '❌ **Validation FAILED** — Please fix issues before merge.' : '✅ **Validation PASSED**'}
-          `;
-          
-          github.rest.issues.createComment({
+
+          const status = summary.failed > 0
+            ? '❌ **Validation FAILED** — Please fix issues before merge.'
+            : summary.warnings > 0
+              ? '⚠️ **Validation PASSED with warnings**'
+              : '✅ **Validation PASSED**';
+
+          const comment = `## 📋 Documentation Validation Results
+
+| Check | Status |
+|-------|--------|
+| Total | ${summary.total} |
+| ✅ Passed | ${summary.passed} |
+| ❌ Failed | ${summary.failed} |
+| ⚠️ Warnings | ${summary.warnings} |
+
+${status}
+
+_Related: #4 (AFL-101)_`;
+
+          await github.rest.issues.createComment({
             issue_number: context.issue.number,
             owner: context.repo.owner,
             repo: context.repo.repo,
