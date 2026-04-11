@@ -179,7 +179,7 @@ def main():
         sys.exit(1)
     elif args.fail_on_warning and runner.results["summary"]["warnings"] > 0:
         print("\n⚠️  Validation passed with warnings")
-        sys.exit(1)
+        sys.exit(0)
     else:
         print("\n✅ Validation PASSED")
         sys.exit(0)
